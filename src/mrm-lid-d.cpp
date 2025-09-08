@@ -1,8 +1,7 @@
 #include "mrm-lid-d.h"
 #include <mrm-robot.h>
 
-std::vector<uint8_t>* commandIndexes_mrm_lid_d =  new std::vector<uint8_t>(); // C++ 17 enables static variables without global initialization, but no C++ 17 here
-std::vector<String>* commandNames_mrm_lid_d =  new std::vector<String>();
+std::map<int, std::string>* Mrm_lid_d::commandNamesSpecific = NULL;
 
 /** Constructor
 @param robot - robot containing this board
@@ -10,16 +9,15 @@ std::vector<String>* commandNames_mrm_lid_d =  new std::vector<String>();
 @param hardwareSerial - Serial, Serial1, Serial2,... - an optional serial port, for example for Bluetooth communication
 @param maxNumberOfBoards - maximum number of boards
 */
-Mrm_lid_d::Mrm_lid_d(Robot* robot, uint8_t maxNumberOfBoards) : 
-	SensorBoard(robot, 1, "LidMul", maxNumberOfBoards, ID_MRM_LID_D, 1) {
+Mrm_lid_d::Mrm_lid_d(uint8_t maxNumberOfBoards) : 
+	SensorBoard(1, "LidMul", maxNumberOfBoards, ID_MRM_LID_D, 1) {
 	readings = new std::vector<std::vector<uint16_t>>(maxNumberOfBoards);
 	_resolution = new std::vector<uint8_t>(maxNumberOfBoards);
 
-	if (commandIndexes_mrm_lid_d->empty()){
-		commandIndexes_mrm_lid_d->push_back(COMMAND_LID_D_RESOLUTION);
-		commandNames_mrm_lid_d->push_back("Resolutio");
-		commandIndexes_mrm_lid_d->push_back(COMMAND_LID_D_FREQUENCY);
-		commandNames_mrm_lid_d->push_back("Frequency");
+	if (commandNamesSpecific == NULL){
+		commandNamesSpecific = new std::map<int, std::string>();
+		commandNamesSpecific->insert({COMMAND_LID_D_RESOLUTION, 	"Resolutio"});
+		commandNamesSpecific->insert({COMMAND_LID_D_FREQUENCY, 	"Frequency"});
 	}
 }
 
@@ -68,7 +66,7 @@ void Mrm_lid_d::add(char * deviceName, uint8_t resolution)
 		canOut = CAN_ID_LID_D_7_OUT;
 		break;
 	default:
-		sprintf(errorMessage, "Too many %s: %i.", _boardsName, nextFree);
+		sprintf(errorMessage, "Too many %s: %i.", _boardsName.c_str(), nextFree);
 		return;
 	}
 	(*_resolution)[nextFree] = resolution;
@@ -76,17 +74,24 @@ void Mrm_lid_d::add(char * deviceName, uint8_t resolution)
 	SensorBoard::add(deviceName, canIn, canOut);
 }
 
+std::string Mrm_lid_d::commandName(uint8_t byte){
+	auto it = commandNamesSpecific->find(byte);
+	if (it == commandNamesSpecific->end())
+		return "Warning: no command found for key " + (int)byte;
+	else
+		return it->second;//commandNamesSpecific->at(byte);
+}
 
 /** Reset sensor's non-volatile memory to defaults (distance mode, timing budget, region of interest, and measurement time, but leaves CAN Bus id intact
 @param deviceNumber - Device's ordinal number. Each call of function add() assigns a increasing number to the device, starting with 0. 0xFF - resets all.
 */
 void Mrm_lid_d::defaults(uint8_t deviceNumber) {
 	// timingBudget(deviceNumber);
-	// robotContainer->delayMs(50); // Allow 50 ms for flash to be written
+	// delayMs(50); // Allow 50 ms for flash to be written
 	// measurementTime(deviceNumber);
-	// robotContainer->delayMs(50);
+	// delayMs(50);
 	// distanceMode(deviceNumber);
-	// robotContainer->delayMs(50);
+	// delayMs(50);
 	// roi(deviceNumber);
 }
 
@@ -102,7 +107,7 @@ void Mrm_lid_d::defaults(uint8_t deviceNumber) {
 uint16_t Mrm_lid_d::distance(uint8_t deviceNumber, uint8_t sampleCount, uint8_t sigmaCount){
 	const uint16_t TIMEOUT = 3000;
 	if (deviceNumber >= nextFree) {
-		sprintf(errorMessage, "%s %i doesn't exist.", _boardsName, deviceNumber);
+		sprintf(errorMessage, "%s %i doesn't exist.", _boardsName.c_str(), deviceNumber);
 		return 0;
 	}
 	if (started(deviceNumber))
@@ -116,9 +121,9 @@ uint16_t Mrm_lid_d::distance(uint8_t deviceNumber, uint8_t sampleCount, uint8_t 
 					(*readings)[deviceNumber][0] = 0; 
 				uint32_t ms = millis();
 				while ((*readings)[deviceNumber][0] == 0){
-					robotContainer->noLoopWithoutThis();
+					noLoopWithoutThis();
 					if (millis() - ms > TIMEOUT){
-						errorCode = 73;
+						errorAdd(CANMessage(devices[deviceNumber].canIdIn, {0}, 0), ERROR_TIMEOUT, false, false);
 						break;
 					}
 				}
@@ -186,7 +191,7 @@ void Mrm_lid_d::frequencySet(uint8_t deviceNumber, uint8_t frequency){
 	if (deviceNumber == 0xFF)
 		for (uint8_t i = 0; i < nextFree; i++)
 			resolutionSet(i, frequency);
-	else if (alive(deviceNumber)) {
+	else if (aliveWithOptionalScan(&devices[deviceNumber])) {
 		delay(1);
 		canData[0] = COMMAND_LID_D_FREQUENCY;
 		canData[1] = frequency;
@@ -201,30 +206,27 @@ void Mrm_lid_d::frequencySet(uint8_t deviceNumber, uint8_t frequency){
 @param length - number of data bytes
 @return - true if canId for this class
 */
-bool Mrm_lid_d::messageDecode(uint32_t canId, uint8_t data[8], uint8_t dlc){
-	for (uint8_t deviceNumber = 0; deviceNumber < nextFree; deviceNumber++)
-		if (isForMe(canId, deviceNumber)){
-			if (!messageDecodeCommon(canId, data, deviceNumber)) {
-				switch (data[0]) {
+bool Mrm_lid_d::messageDecode(CANMessage& message) {
+	for (Device& device : devices)
+		if (isForMe(message.id, device)) {
+			if (!messageDecodeCommon(message, device)) {
+				switch (message.data[0]) {
 				case COMMAND_SENSORS_MEASURE_SENDING: {
-					uint8_t startIndex = data[1];
+					uint8_t startIndex = message.data[1];
 					for (uint8_t j = 2; j < 7; j+=2){
-						uint16_t mm = (data[j+1] << 8) | data[j];
-						(*readings)[deviceNumber][startIndex++] = mm;
-						// print("Distance for %i: %i mm (%i %i)\n\r", startIndex-1, mm, data[j], data[j+1]);
+						uint16_t mm = (message.data[j+1] << 8) | message.data[j];
+						(*readings)[device.number][startIndex++] = mm;
+						// print("Distance for %i: %i mm (%i %i)\n\r", startIndex-1, mm, message.data[j], message.data[j+1]);
 					}
-					(*_lastReadingMs)[deviceNumber] = millis();
+					device.lastReadingsMs = millis();
 				}
 				break;
 				case COMMAND_INFO_SENDING_1:
-					print("%s: %s dist., budget %i ms, %ix%i, intermeas. %i ms\n\r", name(deviceNumber), data[1] ? "short" : "long", data[2] | (data[3] << 8),
-						data[4] & 0xFF, data[5] & 0xFF, data[6] | (data[7] << 8));
+					print("%s: %s dist., budget %i ms, %ix%i, intermeas. %i ms\n\r", device.name.c_str(), message.data[1] ? "short" : "long", message.data[2] | (message.data[3] << 8),
+						message.data[4] & 0xFF, message.data[5] & 0xFF, message.data[6] | (message.data[7] << 8));
 					break;
 				default:
-					print("Unknown command. ");
-					messagePrint(canId, dlc, data, false);
-					errorCode = 202;
-					errorInDeviceNumber = deviceNumber;
+					errorAdd(message, ERROR_COMMAND_UNKNOWN, false, true);
 				}
 			}
 			return true;
@@ -232,21 +234,6 @@ bool Mrm_lid_d::messageDecode(uint32_t canId, uint8_t data[8], uint8_t dlc){
 	return false;
 }
 
-/** Enable plug and play
-@param enable - enable or disable
-@param deviceNumber - Device's ordinal number. Each call of function add() assigns a increasing number to the device, starting with 0.
-*/
-void Mrm_lid_d::pnpSet(bool enable, uint8_t deviceNumber){
-	if (deviceNumber == 0xFF)
-		for (uint8_t i = 0; i < nextFree; i++)
-			pnpSet(enable, i);
-	else if (alive(deviceNumber)) {
-		delay(1);
-		canData[0] = enable ? COMMAND_PNP_ENABLE : COMMAND_PNP_DISABLE;
-		canData[1] = enable;
-		messageSend(canData, 2, deviceNumber);
-	}
-}
 
 /** Analog readings
 @param receiverNumberInSensor - always 0
@@ -261,9 +248,9 @@ uint16_t Mrm_lid_d::reading(uint8_t receiverNumberInSensor, uint8_t deviceNumber
 */
 void Mrm_lid_d::readingsPrint() {
 	print("Lid4mMul:");
-	for (uint8_t deviceNumber = 0; deviceNumber < nextFree; deviceNumber++)
-		if (alive(deviceNumber))
-			print(" %4i", distance(deviceNumber));
+	for (Device& device: devices)
+		if (device.alive)
+			print(" %4i", distance(device.number));
 }
 
 /** Resolution, 4x4 or 8x8.
@@ -278,7 +265,7 @@ void Mrm_lid_d::resolutionSet(uint8_t deviceNumber, uint8_t resolution){
 	if (deviceNumber == 0xFF)
 		for (uint8_t i = 0; i < nextFree; i++)
 			resolutionSet(i, resolution);
-	else if (alive(deviceNumber)) {
+	else if (aliveWithOptionalScan(&devices[deviceNumber])) {
 		delay(1);
 		canData[0] = COMMAND_LID_D_RESOLUTION;
 		canData[1] = resolution;
@@ -293,21 +280,21 @@ void Mrm_lid_d::resolutionSet(uint8_t deviceNumber, uint8_t resolution){
 @return - started or not
 */
 bool Mrm_lid_d::started(uint8_t deviceNumber) {
-	if (millis() - (*_lastReadingMs)[deviceNumber] > MRM_LID_D_INACTIVITY_ALLOWED_MS || (*_lastReadingMs)[deviceNumber] == 0) {
+	if (millis() - devices[deviceNumber].lastReadingsMs > MRM_LID_D_INACTIVITY_ALLOWED_MS || devices[deviceNumber].lastReadingsMs == 0) {
 		//print("Start mrm-lid-can-b2%i \n\r", deviceNumber);
 		for (uint8_t i = 0; i < 8; i++) { // 8 tries
-			start(deviceNumber, 0);
+			start(&devices[deviceNumber], 0);
 			// Wait for 1. message.
 			uint32_t startMs = millis();
 			while (millis() - startMs < 50) {
-				if (millis() - (*_lastReadingMs)[deviceNumber] < 100) {
+				if (millis() - devices[deviceNumber].lastReadingsMs < 100) {
 					//print("Lidar confirmed\n\r"); 
 					return true;
 				}
-				robotContainer->delayMs(1);
+				delayMs(1);
 			}
 		}
-		sprintf(errorMessage, "%s %i dead.", _boardsName, deviceNumber);
+		sprintf(errorMessage, "%s %i dead.", _boardsName.c_str(), deviceNumber);
 		return false;
 	}
 	else
@@ -319,26 +306,26 @@ bool Mrm_lid_d::started(uint8_t deviceNumber) {
 */
 void Mrm_lid_d::test()
 {
-	static uint32_t lastMs = 0;
+	static uint64_t lastMs = 0;
 #define MRM_LID_H_TEST_MULTI 1	
 // 64-resolution never enabled.
 // #define MRM_LID_H_TEST_64 1
-// 	if (robotContainer->setup()){
+// 	if (setup()){
 // #if MRM_LID_H_TEST_64
 // 		resolutionSet(0xFF, 64);
 // #else
 // 		resolutionSet(0xFF, 16);
 // #endif
-// 	robotContainer->delayMs(1000); // Time needed for sensor to restart after resolution set.
+// 	delay(1000); // Time needed for sensor to restart after resolution set.
 // }
 	if (millis() - lastMs > 1000) {
 		uint8_t pass = 0;
-		for (uint8_t deviceNumber = 0; deviceNumber < nextFree; deviceNumber++) {
-			if (alive(deviceNumber)) {
+		for (Device& device: devices) {
+			if (device.alive) {
 #if MRM_LID_H_TEST_MULTI
-				for (int8_t y = ((*_resolution)[deviceNumber] == 64 ? 7 : 3); y >= 0; y--){
-					for (uint8_t x = 0; x < ((*_resolution)[deviceNumber] == 64 ? 8 : 4); x++)
-						print("%4i ", dot(deviceNumber, x, y));
+				for (int8_t y = ((*_resolution)[device.number] == 64 ? 7 : 3); y >= 0; y--){
+					for (uint8_t x = 0; x < ((*_resolution)[device.number] == 64 ? 8 : 4); x++)
+						print("%4i ", dot(device.number, x, y));
 					print("\n\r");
 				}
 #endif

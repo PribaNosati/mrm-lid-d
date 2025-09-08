@@ -1,6 +1,7 @@
 #pragma once
 #include "Arduino.h"
 #include <mrm-board.h>
+#include <map>
 
 /**
 Purpose: mrm-lid-can-b2 interface to CANBus.
@@ -61,13 +62,14 @@ class Mrm_lid_d : public SensorBoard
 	bool started(uint8_t deviceNumber);
 	
 public:
+	static std::map<int, std::string>* commandNamesSpecific;
 
 	/** Constructor
 	@param robot - robot containing this board
 	@param esp32CANBusSingleton - a single instance of CAN Bus common library for all CAN Bus peripherals.
 	@param hardwareSerial - Serial, Serial1, Serial2,... - an optional serial port, for example for Bluetooth communication
 	*/
-	Mrm_lid_d(Robot* robot = NULL, uint8_t maxDevices = 8);
+	Mrm_lid_d(uint8_t maxDevices = 8);
 
 	~Mrm_lid_d();
 
@@ -82,6 +84,8 @@ public:
 	*/
 	void calibration(uint8_t deviceNumber = 0);
 
+	std::string commandName(uint8_t byte);
+	
 	/** Reset sensor's non-volatile memory to defaults (distance mode, timing budget, region of interest, and measurement time, but leaves CAN Bus id intact
 	@param deviceNumber - Device's ordinal number. Each call of function add() assigns a increasing number to the device, starting with 0. 0xFF - resets all.
 	*/
@@ -122,13 +126,7 @@ public:
 	@param canId - CAN Bus id
 	@param data - 8 bytes from CAN Bus message.
 	*/
-	bool messageDecode(uint32_t canId, uint8_t data[8], uint8_t dlc = 8);
-
-	/** Enable plug and play
-	@param enable - enable or disable
-	@param deviceNumber - Device's ordinal number. Each call of function add() assigns a increasing number to the device, starting with 0.
-	*/
-	void pnpSet(bool enable = true, uint8_t deviceNumber = 0);
+	bool messageDecode(CANMessage& message);
 
 	/** Analog readings
 	@param receiverNumberInSensor - always 0
